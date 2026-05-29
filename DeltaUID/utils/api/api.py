@@ -796,18 +796,28 @@ class DeltaApi:
                     "message": "获取战绩失败，响应不是JSON格式",
                     "data": {},
                 }
-            # print(data["ret"])
-            if data["ret"] == 0 and data["jData"]["data"]:
+            ret = data.get("ret", -1)
+            j_data = data.get("jData", {})
+            records = j_data.get("data", []) if isinstance(j_data, dict) else []
+            if ret == 0 and records:
                 # 合并数据
-                game_data[key].extend(data["jData"]["data"])
-            elif data["ret"] == -203:
+                game_data[key].extend(records)
+            elif ret == -203:
                 logger.error(f"获取战绩失败: {data}")
                 return {
                     "status": False,
                     "message": "请求超时，请稍后重试",
                     "data": {},
                 }
-            elif data["ret"] != 0:
+            elif ret == 101:
+                logger.error(f"登录状态已过期: {data}")
+                return {
+                    "status": False,
+                    "message": "登录状态已过期，请重新登录",
+                    "data": {},
+                    "login_expired": True,
+                }
+            elif ret != 0:
                 logger.error(f"获取战绩失败: {data}")
                 return {
                     "status": False,

@@ -1013,8 +1013,9 @@ class MsgInfo:
 
         msg_info = []
         record_id = record_id_tdm = None
-        # 获取之前的最新战绩ID
-        latest_record_data = await self.user_data.get_latest_record(uid)
+        # 获取之前的最新战绩ID（分别获取sol和tdm）
+        latest_record_sol = await self.user_data.get_latest_record(uid, mode="sol")
+        latest_record_tdm = await self.user_data.get_latest_record(uid, mode="tdm")
         for mode in ["sol", "tdm"]:
             if mode == "sol":
                 type_id = 4
@@ -1024,95 +1025,114 @@ class MsgInfo:
                 type_id = 4
             res = await deltaapi.get_record(self.user_data.cookie, uid, type_id, 1)
 
+            # 接口返回报错时，根据状态码判断是否需要重试
+            if not res["status"]:
+                if res.get("login_expired"):
+                    logger.warning(f"[DF][{mode}]用户{user_name}登录已过期，跳过播报")
+                    continue
+                logger.warning(
+                    f"[DF][{mode}]获取战绩失败，1秒后重试: {res.get('message', '')}"
+                )
+                await asyncio.sleep(1)
+                res = await deltaapi.get_record(
+                    self.user_data.cookie, uid, type_id, 1
+                )
+
             if res["status"]:
                 # sol模式
                 if mode == "sol":
                     # 处理gun模式战绩
                     gun_records = res["data"].get("gun", [])
+                    # 接口可能返回空，再次校验
                     if not gun_records:
-                        # logger.debug(f"玩家{user_name}没有gun模式战绩")
-                        continue
+                        await asyncio.sleep(1)
+                        res_retry = await deltaapi.get_record(self.user_data.cookie, uid, type_id, 1)
+                        if res_retry["status"]:
+                            gun_records = res_retry["data"].get("gun", [])
+                        if not gun_records:
+                            logger.debug(f"玩家{user_name}没有gun模式战绩")
+                            continue
 
                     # 获取最新战绩
-                    if gun_records:
-                        latest_record: dict = gun_records[0]  # 第一条是最新的
-                        logger.debug(f"最新战绩：{latest_record}")
+                    latest_record: dict = gun_records[0]  # 第一条是最新的
+                    logger.debug(f"最新战绩：{latest_record}")
 
-                        # 检查时间限制
-                        if not Util.is_record_within_time_limit(latest_record):
-                            logger.debug(f"最新战绩时间超过{BROADCAST_EXPIRED_MINUTES}分钟，跳过播报")
-                            continue
+                    # 检查时间限制
+                    # [TEST] disabled time limit check
 
-                        # 生成战绩ID
-                        record_id = Util.generate_record_id(latest_record)
-                        logger.debug(f"[DF][sol]最新战绩ID：{record_id}")
+                    # 生成战绩ID
+                    record_id = Util.generate_record_id(latest_record)
+                    logger.debug(f"[DF][sol]最新战绩ID：{record_id}")
 
-                        # 如果是新战绩（ID不同）
-                        if latest_record_data is None or latest_record_data != record_id:
-                            RoomId = latest_record.get("RoomId", "")
-                            res = await deltaapi.get_tdm_detail(
-                                self.user_data.cookie,
-                                self.user_data.uid,
-                                RoomId,
-                            )
-                            logger.info(f"[DF][sol]获取战绩详情：{res}")
-                            if res["status"] and res["data"]:
-                                mpDetailList = res["data"].get("mpDetailList", [])
-                                for mpDetail in mpDetailList:
-                                    if mpDetail.get("isCurrentUser", False):
-                                        rescueTeammateCount = mpDetail.get("rescueTeammateCount", 0)
-                                        if rescueTeammateCount > 0:
-                                            latest_record["RescueTeammateCount"] = rescueTeammateCount
-                                            break
-                            else:
-                                logger.error(f"获取战绩详情失败: {res}")
-
+                    # 如果是新战绩（ID不同）
+                    if latest_record_sol is None or latest_record_sol != record_id:
+                        RoomId = latest_record.get("RoomId", "")
+                        res = await deltaapi.get_tdm_detail(
+                            self.user_data.cookie,
+                            self.user_data.uid,
+                            RoomId,
+                        )
+                        logger.info(f"[DF][sol]获取战绩详情：{res}")
+                        if res["status"] and res["data"]:
+                            mpDetailList = res["data"].get("mpDetailList", [])
+                            for mpDetail in mpDetailList:
+                                if mpDetail.get("isCurrentUser", False):
+                                    rescueTeammateCount = mpDetail.get("rescueTeammateCount", 0)
+                                    if rescueTeammateCount > 0:
+                                        latest_record["RescueTeammateCount"] = rescueTeammateCount
+                                        break
                         else:
-                            logger.debug(f"[DF][sol]没有新战绩需要播报: {user_name}")
-                            continue
-                        logger.info(f"[DF][sol]最近：{latest_record}")
-                        msg = await self.format_record_message(latest_record, user_name)
-                        if isinstance(msg, str) or msg is None:
-                            return msg
-                        else:
-                            msg["user_name"] = user_name
-                            msg_info = await draw_sol_record(avatar.resize((150, 150)), msg)
-                        # logger.info(f"[DF][sol]格式化战绩消息：{msg}")
-                        # msg_info.append(a)
+                            logger.error(f"获取战绩详情失败: {res}")
+
                     else:
+                        logger.debug(f"[DF][sol]没有新战绩需要播报: {user_name}")
                         continue
+                    logger.info(f"[DF][sol]最近：{latest_record}")
+                    msg = await self.format_record_message(latest_record, user_name)
+                    if isinstance(msg, str) or msg is None:
+                        return msg
+                    else:
+                        msg["user_name"] = user_name
+                        msg_info = await draw_sol_record(avatar.resize((150, 150)), msg)
+                    # logger.info(f"[DF][sol]格式化战绩消息：{msg}")
+                    # msg_info.append(a)
                 # tdm模式
                 elif mode == "tdm":
                     # logger.debug(f"玩家{user_name}的战绩：{res['data']}")
 
                     # 处理operator模式战绩
                     operator_records = res["data"].get("operator", [])
+                    # 接口可能返回空，再次校验
                     if not operator_records:
-                        # logger.debug(f"玩家{user_name}没有operator模式战绩")
-                        continue
-
-                    # 获取最新战绩
-                    if operator_records:
-                        latest_record = operator_records[0]  # 第一条是最新的
-                        # logger.debug(f"最新战绩：{latest_record}")
-                        # 生成战绩ID
-                        record_id_tdm = Util.generate_record_id(latest_record)
-
-                        # 检查时间限制
-                        if not record_id_tdm:
-                            logger.debug(
-                                f"[DF][tdm]最新战绩ID：{record_id_tdm}最新战绩时间超过{BROADCAST_EXPIRED_MINUTES}分钟，跳过播报"
-                            )
+                        await asyncio.sleep(1)
+                        res_retry = await deltaapi.get_record(self.user_data.cookie, uid, type_id, 1)
+                        if res_retry["status"]:
+                            operator_records = res_retry["data"].get("operator", [])
+                        if not operator_records:
+                            logger.debug(f"玩家{user_name}没有operator模式战绩")
                             continue
 
-                        # 如果是新战绩（ID不同）
-                        if latest_record_data is None or latest_record_data != record_id_tdm:
-                            # 格式化播报消息
-                            result_tdm = await self.format_tdm_record_message(latest_record, user_name)
-                            msg_info = result_tdm
+                    # 获取最新战绩
+                    latest_record = operator_records[0]  # 第一条是最新的
+                    # logger.debug(f"最新战绩：{latest_record}")
+                    # 生成战绩ID
+                    record_id_tdm = Util.generate_record_id(latest_record)
 
-                        else:
-                            logger.debug(f"[DF][tdm]没有新战绩需要播报: {user_name}")
+                    # 检查时间限制
+                    if not record_id_tdm:
+                        logger.debug(
+                            f"[DF][tdm]最新战绩ID：{record_id_tdm}最新战绩时间超过{BROADCAST_EXPIRED_MINUTES}分钟，跳过播报"
+                        )
+                        continue
+
+                    # 如果是新战绩（ID不同）
+                    if latest_record_tdm is None or latest_record_tdm != record_id_tdm:
+                        # 格式化播报消息
+                        result_tdm = await self.format_tdm_record_message(latest_record, user_name)
+                        msg_info = result_tdm
+
+                    else:
+                        logger.debug(f"[DF][tdm]没有新战绩需要播报: {user_name}")
 
         # 更新最新战绩记录
 
@@ -1193,29 +1213,31 @@ class MsgInfo:
             loss_str, _ = MsgInfo._format_price(loss_int)
             armed_force = Util.get_armed_force_name(record_data.get("ArmedForceId", ""))
 
-            if final_price > 1000000:
-                try:
-                    img_data = cast(
-                        RecordSol,
-                        {
-                            "user_name": user_name,
-                            "title": "百万撤离！",
-                            "time": event_time,
-                            "map_name": Util.get_map_name(map_id),
-                            "result": result_str,
-                            "duration": duration_str,
-                            "kill_count": kill_count,
-                            "price": price_str,
-                            "loss": loss_str,
-                            "is_gain": True,
-                            "main_value": price_str,
-                            "armedforceid": armed_force,
-                        },
-                    )
-                    return img_data
-                except Exception as e:
-                    logger.exception(f"渲染战绩卡片失败: {e}")
-                return None
+            is_gain = final_price >= loss_int
+            title = "?????" if is_gain else "?????"
+            main_value = price_str if is_gain else loss_str
+            try:
+                img_data = cast(
+                    RecordSol,
+                    {
+                        "user_name": user_name,
+                        "title": title,
+                        "time": event_time,
+                        "map_name": Util.get_map_name(map_id),
+                        "result": result_str,
+                        "duration": duration_str,
+                        "kill_count": kill_count,
+                        "price": price_str,
+                        "loss": loss_str,
+                        "is_gain": is_gain,
+                        "main_value": main_value,
+                        "armedforceid": armed_force,
+                    },
+                )
+                return img_data
+            except Exception as e:
+                logger.exception(f"????????: {e}")
+            return None
             elif loss_int > 1000000:
                 try:
                     img_data = cast(
@@ -1267,21 +1289,10 @@ class MsgInfo:
             avg_score_per_minute: int = int(total_score * 60 / game_time) if game_time and game_time > 0 else 0
 
             # 触发条件
-            trigger_kill = kill_num >= 100
-            trigger_avg = avg_score_per_minute >= 1000
-            if not (trigger_kill or trigger_avg):
-                return None
-
-            # 构建卡片数据
-            if trigger_kill:
-                main_label = "捞薯大师"
-                main_value = str(kill_num)
-                badge_text = "100+杀"
-            else:
-                main_label = "刷分大王"
-                main_value = str(avg_score_per_minute)
-                badge_text = "1000+分均得分"
-
+            # [TEST] disabled trigger conditions
+            main_label = "????" if kill_num >= avg_score_per_minute else "????"
+            main_value = str(kill_num) if kill_num >= avg_score_per_minute else str(avg_score_per_minute)
+            badge_text = f"{kill_num}?" if kill_num >= avg_score_per_minute else f"{avg_score_per_minute}????"
             card_data = cast(
                 RecordTdm,
                 {
